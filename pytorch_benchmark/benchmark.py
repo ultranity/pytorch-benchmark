@@ -1,7 +1,7 @@
 import inspect
 from logging import getLogger
 from time import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, List
 
 import numpy as np
 import torch
@@ -287,27 +287,24 @@ def fmt(d: dict):
 
 def benchmark(
     model: torch.nn.Module,
-    sample: torch.Tensor,
+    sample: torch.Size, # no bs here
     num_runs: int = 100,
+    batch_size: List[int] = [1, 8, 64],
     print_details=False,
     get_device_fn: Callable[[Any], torch.device] = get_device,
     transfer_to_device_fn=torch.Tensor.to,
-    sample_with_batch_size1: Any = None,
-    batch_size: int = None,
     print_fn=logger.info,
     warm_up_fn=warm_up,
+    warm_up_bs=1
 ):
     results = {}
-    batch_size = batch_size or sample.shape[0]
-
-    sample = transfer_to_device_fn(sample, "cpu")
-
-    # Prepare sample with batch size 1
-    if sample_with_batch_size1:
-        sample1 = sample_with_batch_size1
-    else:
-        sample1_shape = (1, *sample.shape[1:])
-        sample1 = torch.randn(sample1_shape)
+    batch_size = batch_size
+    batch_size = list(batch_size) if issubclass(type(batch_size), Iterable) else [batch_size]
+    batch_size.append(warm_up_bs)
+    samples = {}
+    #if sample is torch.Size:
+    for bs in set(batch_size):
+        samples[bs] = torch.randn((bs, *sample))
 
     prevously_training = getattr(model, "training", False)
     if hasattr(model, "eval"):
@@ -334,16 +331,16 @@ def benchmark(
     # Measure FLOPs
     warm_up_fn(
         model,
-        sample1,
+        samples[warm_up_bs],
         model_device,
         transfer_to_device_fn,
         num_runs=1,
-        batch_size=1,
+        batch_size=warm_up_bs,
     )
 
     with torch.no_grad():
         flops = measure_flops(
-            model, transfer_to_device_fn(sample1, model_device), print_details
+            model, transfer_to_device_fn(samples[1], model_device), print_details
         )
 
     if _is_valid(flops):
@@ -355,9 +352,8 @@ def benchmark(
     timing = {}
     energy = {}
     with torch.no_grad():
-        for bs in sorted(set([1, batch_size])):
-            s = sample1 if bs == 1 else sample
-
+        for bs in sorted(set(batch_size)):
+            s = samples[bs]
             # Measure Allocated Memory
             if model_device.type == "cuda":
                 pre_mem, post_mem, max_mem = measure_allocated_memory(
